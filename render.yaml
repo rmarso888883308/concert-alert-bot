@@ -1,9 +1,7 @@
 services:
-  - type: web
+  - type: worker
     name: concert-alert-bot
     env: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "./start.sh"
+    startCommand: "python main.py"
     plan: free
-    # Forcer l'utilisation de Python 3.11 au lieu de 3.13
-    runtime: python-3.11.9
