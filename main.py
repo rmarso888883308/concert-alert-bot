@@ -12,20 +12,23 @@ DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1400499247907868722/AWr8
 TWITTER_USERS = ["TicketmasterFR", "AEGPresentsFR"]
 CHECK_INTERVAL = 300  # 5 minutes
 STORAGE_FOLDER = "tweets_seen"
-PORT = int(os.environ.get('PORT', 10000))  # Port requis par Render
+PORT = int(os.environ.get('PORT', 10000))
 
 # Headers pour simuler un navigateur
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
-# Liste d'instances Nitter publiques
+# Liste d'instances Nitter publiques (plus robuste)
 NITTER_INSTANCES = [
     "https://nitter.net",
-    "https://nitter.it", 
-    "https://x.owo.si",
-    "https://nitter.privacydev.net"
+    "https://nitter.it",
+    "https://nitter.privacydev.net",
+    "https://nitter.weiler.rocks",
+    "https://nitter.poast.org",
+    "https://nitter.x86-64-unknown-linux-gnu.zip",
 ]
+
 
 # === SETUP DU DOSSIER DE STOCKAGE ===
 if not os.path.exists(STORAGE_FOLDER):
@@ -78,7 +81,7 @@ def start_web_server():
     print(f"🌐 Serveur web démarré sur le port {PORT}")
     server.serve_forever()
 
-# === FONCTIONS DE SCRAPING (identiques à la version précédente) ===
+# === FONCTIONS DE SCRAPING (AMÉLIORÉES) ===
 def get_latest_tweet_multiple_sources(user):
     """Essaie plusieurs sources pour récupérer les tweets"""
     
@@ -87,34 +90,17 @@ def get_latest_tweet_multiple_sources(user):
         try:
             print(f"🔄 Tentative avec {instance}")
             nitter_url = f"{instance}/{user}/rss"
-            response = requests.get(nitter_url, headers=HEADERS, timeout=15)
+            response = requests.get(nitter_url, headers=HEADERS, timeout=10)
+            response.raise_for_status() # Lève une exception pour les codes d'erreur HTTP
             
-            if response.status_code == 200:
-                content = response.text
-                tweet_url, tweet_text = parse_rss_content(content, user)
-                if tweet_url:
-                    print(f"✅ Succès avec {instance}")
-                    return tweet_url, tweet_text
+            content = response.text
+            tweet_url, tweet_text = parse_rss_content(content, user)
+            if tweet_url:
+                print(f"✅ Succès avec {instance}")
+                return tweet_url, tweet_text
                     
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
             print(f"❌ Échec avec {instance}: {e}")
-            continue
-    
-    # Méthode 2: Scraping direct de la page Nitter
-    for instance in NITTER_INSTANCES:
-        try:
-            print(f"🔄 Scraping direct avec {instance}")
-            page_url = f"{instance}/{user}"
-            response = requests.get(page_url, headers=HEADERS, timeout=15)
-            
-            if response.status_code == 200:
-                tweet_url, tweet_text = parse_nitter_page(response.text, user)
-                if tweet_url:
-                    print(f"✅ Scraping réussi avec {instance}")
-                    return tweet_url, tweet_text
-                    
-        except Exception as e:
-            print(f"❌ Scraping échoué avec {instance}: {e}")
             continue
     
     return None, None
@@ -131,7 +117,7 @@ def parse_rss_content(content, user):
                 # Extraire le lien
                 link_match = re.search(r'<link>(.*?)</link>', item)
                 if link_match:
-                    tweet_url = link_match.group(1)
+                    tweet_url = link_match.group(1).replace("nitter.net", "twitter.com") # Remplacer par twitter.com
                     
                     # Extraire le contenu
                     desc_match = re.search(r'<description><!\[CDATA\[(.*?)\]\]></description>', item, re.DOTALL)
@@ -149,32 +135,6 @@ def parse_rss_content(content, user):
         print(f"Erreur parsing RSS: {e}")
         return None, None
 
-def parse_nitter_page(html_content, user):
-    """Parse la page Nitter pour extraire le dernier tweet"""
-    try:
-        # Rechercher le premier tweet sur la page
-        tweet_pattern = r'<div class="tweet-content media-body"[^>]*>(.*?)</div>'
-        tweet_match = re.search(tweet_pattern, html_content, re.DOTALL)
-        
-        if tweet_match:
-            tweet_text = tweet_match.group(1)
-            # Nettoyer le HTML
-            tweet_text = re.sub(r'<[^>]+>', '', tweet_text)
-            tweet_text = tweet_text.strip()
-            
-            # Rechercher l'ID du tweet dans l'URL
-            tweet_id_pattern = r'/status/(\d+)'
-            tweet_id_match = re.search(tweet_id_pattern, html_content)
-            
-            if tweet_id_match:
-                tweet_id = tweet_id_match.group(1)
-                tweet_url = f"https://twitter.com/{user}/status/{tweet_id}"
-                return tweet_url, tweet_text[:300] + "..." if len(tweet_text) > 300 else tweet_text
-        
-        return None, None
-    except Exception as e:
-        print(f"Erreur parsing page: {e}")
-        return None, None
 
 # === FONCTIONS DE STOCKAGE ET DISCORD ===
 def read_last_tweet(user):
@@ -209,9 +169,7 @@ def monitor_twitter():
     print("🟢 Surveillance de @TicketmasterFR et @AEGPresentsFR en cours...")
     print("🔄 Utilisation de sources multiples (Nitter instances)...")
     
-    consecutive_failures = {}
-    for user in TWITTER_USERS:
-        consecutive_failures[user] = 0
+    consecutive_failures = {user: 0 for user in TWITTER_USERS}
     
     while True:
         current_time = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -245,7 +203,7 @@ def monitor_twitter():
                         webhook.execute()
                     except:
                         pass
-                    consecutive_failures[user] = 0
+                    # Ne réinitialise pas le compteur pour que l'alerte ne soit pas envoyée en boucle
         
         print(f"😴 Attente de {CHECK_INTERVAL} secondes...")
         time.sleep(CHECK_INTERVAL)
