@@ -16,19 +16,18 @@ PORT = int(os.environ.get('PORT', 10000))
 
 # Headers pour simuler un navigateur
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
 
-# Liste d'instances Nitter publiques (plus robuste)
+# Liste d'instances Nitter publiques (MISE À JOUR)
 NITTER_INSTANCES = [
-    "https://nitter.net",
     "https://nitter.it",
-    "https://nitter.privacydev.net",
     "https://nitter.weiler.rocks",
-    "https://nitter.poast.org",
-    "https://nitter.x86-64-unknown-linux-gnu.zip",
+    "https://nitter.d420.de",
+    "https://nitter.catsarch.com",
+    "https://nitter.cz",
+    "https://nitter.privacy.com.de"
 ]
-
 
 # === SETUP DU DOSSIER DE STOCKAGE ===
 if not os.path.exists(STORAGE_FOLDER):
@@ -41,8 +40,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
-            
-            # Statistiques du bot
             stats = {
                 "status": "running",
                 "monitored_accounts": TWITTER_USERS,
@@ -71,11 +68,9 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.wfile.write(html.encode())
     
     def log_message(self, format, *args):
-        # Supprimer les logs HTTP pour réduire le bruit
         return
 
 def start_web_server():
-    """Démarre le serveur web en arrière-plan"""
     server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
     server.last_check = "Starting..."
     print(f"🌐 Serveur web démarré sur le port {PORT}")
@@ -83,58 +78,79 @@ def start_web_server():
 
 # === FONCTIONS DE SCRAPING (AMÉLIORÉES) ===
 def get_latest_tweet_multiple_sources(user):
-    """Essaie plusieurs sources pour récupérer les tweets"""
-    
     # Méthode 1: RSS via plusieurs instances Nitter
     for instance in NITTER_INSTANCES:
         try:
-            print(f"🔄 Tentative avec {instance}")
-            nitter_url = f"{instance}/{user}/rss"
-            response = requests.get(nitter_url, headers=HEADERS, timeout=10)
-            response.raise_for_status() # Lève une exception pour les codes d'erreur HTTP
-            
-            content = response.text
-            tweet_url, tweet_text = parse_rss_content(content, user)
-            if tweet_url:
-                print(f"✅ Succès avec {instance}")
-                return tweet_url, tweet_text
-                    
+            print(f"🔄 [RSS] Tentative avec {instance}")
+            rss_url = f"{instance}/{user}/rss"
+            response = requests.get(rss_url, headers=HEADERS, timeout=10)
+            if response.status_code == 200:
+                tweet_url, tweet_text = parse_rss_content(response.text)
+                if tweet_url:
+                    print(f"✅ [RSS] Succès avec {instance}")
+                    return tweet_url, tweet_text
         except requests.exceptions.RequestException as e:
-            print(f"❌ Échec avec {instance}: {e}")
+            print(f"❌ [RSS] Échec avec {instance}: {e}")
+            continue
+
+    print(f"⚠️ [RSS] Toutes les tentatives RSS ont échoué pour @{user}. Passage au scraping direct.")
+
+    # Méthode 2: Scraping direct de la page Nitter (si RSS échoue)
+    for instance in NITTER_INSTANCES:
+        try:
+            print(f"🔄 [Scraping] Tentative avec {instance}")
+            page_url = f"{instance}/{user}"
+            response = requests.get(page_url, headers=HEADERS, timeout=10)
+            if response.status_code == 200:
+                tweet_url, tweet_text = parse_nitter_page(response.text, user, instance)
+                if tweet_url:
+                    print(f"✅ [Scraping] Succès avec {instance}")
+                    return tweet_url, tweet_text
+        except requests.exceptions.RequestException as e:
+            print(f"❌ [Scraping] Échec avec {instance}: {e}")
             continue
     
     return None, None
 
-def parse_rss_content(content, user):
-    """Parse le contenu RSS pour extraire le tweet"""
+def parse_rss_content(content):
     try:
-        if '<item>' in content:
-            item_start = content.find('<item>')
-            item_end = content.find('</item>') + 7
-            if item_start != -1 and item_end != -1:
-                item = content[item_start:item_end]
+        item_match = re.search(r'<item>(.*?)</item>', content, re.DOTALL)
+        if item_match:
+            item = item_match.group(1)
+            link_match = re.search(r'<link>(.*?)</link>', item)
+            desc_match = re.search(r'<description><!\[CDATA\[(.*?)\]\]></description>', item, re.DOTALL)
+            
+            if link_match and desc_match:
+                # Remplace l'URL Nitter par une URL Twitter pour la cohérence
+                tweet_url = re.sub(r'https?://[^/]+', 'https://twitter.com', link_match.group(1))
                 
-                # Extraire le lien
-                link_match = re.search(r'<link>(.*?)</link>', item)
-                if link_match:
-                    tweet_url = link_match.group(1).replace("nitter.net", "twitter.com") # Remplacer par twitter.com
-                    
-                    # Extraire le contenu
-                    desc_match = re.search(r'<description><!\[CDATA\[(.*?)\]\]></description>', item, re.DOTALL)
-                    if desc_match:
-                        tweet_text = desc_match.group(1)
-                        # Nettoyer le HTML
-                        tweet_text = re.sub(r'<[^>]+>', '', tweet_text)
-                        tweet_text = tweet_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-                        tweet_text = tweet_text.strip()
-                        
-                        return tweet_url, tweet_text[:300] + "..." if len(tweet_text) > 300 else tweet_text
-        
-        return None, None
+                tweet_text = desc_match.group(1)
+                tweet_text = re.sub(r'<[^>]+>', '', tweet_text)
+                tweet_text = tweet_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&').strip()
+                return tweet_url, tweet_text[:300] + "..." if len(tweet_text) > 300 else tweet_text
     except Exception as e:
         print(f"Erreur parsing RSS: {e}")
-        return None, None
+    return None, None
 
+def parse_nitter_page(html_content, user, instance):
+    try:
+        # Trouve le premier lien vers un statut de tweet
+        status_link_match = re.search(r'/<a href="/' + user + r'/status/(\d+)"', html_content)
+        if status_link_match:
+            tweet_id = status_link_match.group(1)
+            tweet_url = f"https://twitter.com/{user}/status/{tweet_id}"
+            
+            # Tente de trouver le contenu du tweet associé
+            # C'est plus fragile, on cherche juste le texte après "tweet-content"
+            content_match = re.search(r'<div class="tweet-content"[^>]*>(.*?)</div>', html_content, re.DOTALL)
+            if content_match:
+                tweet_text = content_match.group(1)
+                tweet_text = re.sub(r'<[^>]+>', '', tweet_text).strip()
+                return tweet_url, tweet_text[:300] + "..." if len(tweet_text) > 300 else tweet_text
+            return tweet_url, "Contenu non récupéré (scraping)." # Fallback si le texte n'est pas trouvé
+    except Exception as e:
+        print(f"Erreur parsing page: {e}")
+    return None, None
 
 # === FONCTIONS DE STOCKAGE ET DISCORD ===
 def read_last_tweet(user):
@@ -159,16 +175,13 @@ def send_to_discord(user, tweet_url, tweet_text):
         if response.status_code == 200:
             print(f"✅ Message Discord envoyé pour @{user}")
         else:
-            print(f"❌ Erreur Discord pour @{user}: {response.status_code}")
+            print(f"❌ Erreur Discord pour @{user}: {response.status_code} - {response.content}")
     except Exception as e:
         print(f"❌ Erreur lors de l'envoi Discord pour @{user}: {e}")
 
 # === BOUCLE PRINCIPALE DE SURVEILLANCE ===
 def monitor_twitter():
-    """Fonction principale de surveillance Twitter"""
     print("🟢 Surveillance de @TicketmasterFR et @AEGPresentsFR en cours...")
-    print("🔄 Utilisation de sources multiples (Nitter instances)...")
-    
     consecutive_failures = {user: 0 for user in TWITTER_USERS}
     
     while True:
@@ -177,12 +190,10 @@ def monitor_twitter():
         
         for user in TWITTER_USERS:
             print(f"🔍 Vérification de @{user}...")
-            
             tweet_url, tweet_text = get_latest_tweet_multiple_sources(user)
             
             if tweet_url and tweet_text:
                 consecutive_failures[user] = 0
-                
                 if tweet_url != read_last_tweet(user):
                     print(f"✅ Nouveau tweet de @{user} détecté : {tweet_url}")
                     send_to_discord(user, tweet_url, tweet_text)
@@ -193,29 +204,23 @@ def monitor_twitter():
                 consecutive_failures[user] += 1
                 print(f"❌ Impossible de récupérer les tweets pour @{user} (échec #{consecutive_failures[user]})")
                 
-                if consecutive_failures[user] >= 6:
+                if consecutive_failures[user] % 6 == 0 and consecutive_failures[user] > 0: # Alerte tous les 6 échecs (30 min)
                     print(f"🚨 ALERTE: {consecutive_failures[user]} échecs consécutifs pour @{user}")
                     try:
                         webhook = DiscordWebhook(
                             url=DISCORD_WEBHOOK_URL,
-                            content=f"🚨 **ALERTE BOT** : Impossible de surveiller @{user} depuis {consecutive_failures[user] * 5} minutes"
+                            content=f"🚨 **ALERTE BOT** : Impossible de surveiller @{user} depuis {consecutive_failures[user] * 5} minutes."
                         )
                         webhook.execute()
-                    except:
-                        pass
-                    # Ne réinitialise pas le compteur pour que l'alerte ne soit pas envoyée en boucle
+                    except Exception as e:
+                        print(f"❌ Erreur envoi alerte Discord: {e}")
         
         print(f"😴 Attente de {CHECK_INTERVAL} secondes...")
         time.sleep(CHECK_INTERVAL)
 
 # === POINT D'ENTRÉE PRINCIPAL ===
 if __name__ == "__main__":
-    # Démarrer le serveur web en arrière-plan
     web_thread = threading.Thread(target=start_web_server, daemon=True)
     web_thread.start()
-    
-    # Attendre un peu que le serveur démarre
     time.sleep(2)
-    
-    # Démarrer la surveillance Twitter
     monitor_twitter()
