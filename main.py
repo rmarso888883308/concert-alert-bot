@@ -3,6 +3,8 @@ import time
 import json
 import requests
 import re
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from discord_webhook import DiscordWebhook
 
 # === CONFIGURATION ===
@@ -10,13 +12,14 @@ DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1400499247907868722/AWr8
 TWITTER_USERS = ["TicketmasterFR", "AEGPresentsFR"]
 CHECK_INTERVAL = 300  # 5 minutes
 STORAGE_FOLDER = "tweets_seen"
+PORT = int(os.environ.get('PORT', 10000))  # Port requis par Render
 
 # Headers pour simuler un navigateur
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
 
-# Liste d'instances Nitter publiques (backup si une ne fonctionne pas)
+# Liste d'instances Nitter publiques
 NITTER_INSTANCES = [
     "https://nitter.net",
     "https://nitter.it", 
@@ -28,11 +31,56 @@ NITTER_INSTANCES = [
 if not os.path.exists(STORAGE_FOLDER):
     os.makedirs(STORAGE_FOLDER)
 
-# === SCRAPER LE DERNIER TWEET D'UN COMPTE (méthode alternative robuste) ===
+# === SERVEUR HTTP MINIMAL POUR RENDER ===
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            
+            # Statistiques du bot
+            stats = {
+                "status": "running",
+                "monitored_accounts": TWITTER_USERS,
+                "check_interval": CHECK_INTERVAL,
+                "last_check": getattr(self.server, 'last_check', 'Never')
+            }
+            self.wfile.write(json.dumps(stats).encode())
+        else:
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            html = f"""
+            <html>
+            <head><title>Concert Alert Bot</title></head>
+            <body>
+                <h1>🎵 Concert Alert Bot</h1>
+                <p>Bot de surveillance actif pour :</p>
+                <ul>
+                    {''.join(f'<li>@{user}</li>' for user in TWITTER_USERS)}
+                </ul>
+                <p>Vérification toutes les {CHECK_INTERVAL//60} minutes</p>
+                <p><a href="/health">Health Check</a></p>
+            </body>
+            </html>
+            """
+            self.wfile.write(html.encode())
+    
+    def log_message(self, format, *args):
+        # Supprimer les logs HTTP pour réduire le bruit
+        return
+
+def start_web_server():
+    """Démarre le serveur web en arrière-plan"""
+    server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
+    server.last_check = "Starting..."
+    print(f"🌐 Serveur web démarré sur le port {PORT}")
+    server.serve_forever()
+
+# === FONCTIONS DE SCRAPING (identiques à la version précédente) ===
 def get_latest_tweet_multiple_sources(user):
-    """
-    Essaie plusieurs sources pour récupérer les tweets
-    """
+    """Essaie plusieurs sources pour récupérer les tweets"""
     
     # Méthode 1: RSS via plusieurs instances Nitter
     for instance in NITTER_INSTANCES:
@@ -128,45 +176,7 @@ def parse_nitter_page(html_content, user):
         print(f"Erreur parsing page: {e}")
         return None, None
 
-# === ALTERNATIVE : Utiliser l'API Twitter v2 (nécessite des clés API) ===
-def get_latest_tweet_api(user, bearer_token=None):
-    """
-    Utilise l'API Twitter v2 - nécessite un Bearer Token
-    À utiliser si vous avez accès à l'API Twitter
-    """
-    if not bearer_token:
-        return None, None
-        
-    try:
-        headers = {'Authorization': f'Bearer {bearer_token}'}
-        url = f"https://api.twitter.com/2/users/by/username/{user}"
-        
-        # Récupérer l'ID utilisateur
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            return None, None
-            
-        user_id = response.json()['data']['id']
-        
-        # Récupérer les tweets
-        tweets_url = f"https://api.twitter.com/2/users/{user_id}/tweets"
-        params = {'max_results': 5, 'tweet.fields': 'created_at,text'}
-        
-        response = requests.get(tweets_url, headers=headers, params=params)
-        if response.status_code == 200:
-            tweets = response.json()['data']
-            if tweets:
-                latest_tweet = tweets[0]
-                tweet_url = f"https://twitter.com/{user}/status/{latest_tweet['id']}"
-                return tweet_url, latest_tweet['text']
-        
-        return None, None
-        
-    except Exception as e:
-        print(f"Erreur API Twitter pour {user}: {e}")
-        return None, None
-
-# === LIRE LE DERNIER TWEET ENVOYÉ POUR UN COMPTE ===
+# === FONCTIONS DE STOCKAGE ET DISCORD ===
 def read_last_tweet(user):
     path = os.path.join(STORAGE_FOLDER, f"{user}.txt")
     if os.path.exists(path):
@@ -174,13 +184,11 @@ def read_last_tweet(user):
             return file.read().strip()
     return ""
 
-# === ENREGISTRER LE NOUVEAU TWEET POUR UN COMPTE ===
 def save_last_tweet(user, tweet_url):
     path = os.path.join(STORAGE_FOLDER, f"{user}.txt")
     with open(path, "w", encoding='utf-8') as file:
         file.write(tweet_url)
 
-# === ENVOYER LE TWEET SUR DISCORD ===
 def send_to_discord(user, tweet_url, tweet_text):
     try:
         webhook = DiscordWebhook(
@@ -195,8 +203,9 @@ def send_to_discord(user, tweet_url, tweet_text):
     except Exception as e:
         print(f"❌ Erreur lors de l'envoi Discord pour @{user}: {e}")
 
-# === BOUCLE PRINCIPALE ===
-def main():
+# === BOUCLE PRINCIPALE DE SURVEILLANCE ===
+def monitor_twitter():
+    """Fonction principale de surveillance Twitter"""
     print("🟢 Surveillance de @TicketmasterFR et @AEGPresentsFR en cours...")
     print("🔄 Utilisation de sources multiples (Nitter instances)...")
     
@@ -205,14 +214,16 @@ def main():
         consecutive_failures[user] = 0
     
     while True:
+        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n🕐 {current_time} - Début du cycle de vérification")
+        
         for user in TWITTER_USERS:
             print(f"🔍 Vérification de @{user}...")
             
-            # Utiliser la méthode multi-sources
             tweet_url, tweet_text = get_latest_tweet_multiple_sources(user)
             
             if tweet_url and tweet_text:
-                consecutive_failures[user] = 0  # Reset compteur d'échecs
+                consecutive_failures[user] = 0
                 
                 if tweet_url != read_last_tweet(user):
                     print(f"✅ Nouveau tweet de @{user} détecté : {tweet_url}")
@@ -224,8 +235,7 @@ def main():
                 consecutive_failures[user] += 1
                 print(f"❌ Impossible de récupérer les tweets pour @{user} (échec #{consecutive_failures[user]})")
                 
-                # Si trop d'échecs consécutifs, envoyer une alerte
-                if consecutive_failures[user] >= 6:  # 30 minutes d'échecs
+                if consecutive_failures[user] >= 6:
                     print(f"🚨 ALERTE: {consecutive_failures[user]} échecs consécutifs pour @{user}")
                     try:
                         webhook = DiscordWebhook(
@@ -235,10 +245,19 @@ def main():
                         webhook.execute()
                     except:
                         pass
-                    consecutive_failures[user] = 0  # Reset pour éviter le spam
+                    consecutive_failures[user] = 0
         
         print(f"😴 Attente de {CHECK_INTERVAL} secondes...")
         time.sleep(CHECK_INTERVAL)
 
+# === POINT D'ENTRÉE PRINCIPAL ===
 if __name__ == "__main__":
-    main()
+    # Démarrer le serveur web en arrière-plan
+    web_thread = threading.Thread(target=start_web_server, daemon=True)
+    web_thread.start()
+    
+    # Attendre un peu que le serveur démarre
+    time.sleep(2)
+    
+    # Démarrer la surveillance Twitter
+    monitor_twitter()
