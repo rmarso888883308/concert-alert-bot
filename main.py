@@ -57,7 +57,7 @@ def main():
                 send_to_discord(user, tweet_url, tweet_text)
                 save_last_tweet(user, tweet_url)
             else:
-                print(f"⏳ Pas de nouveau tweet pour @{user} »)
+                print(f"⏳ Pas de nouveau tweet pour @{user} »")
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
